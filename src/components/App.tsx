@@ -15,6 +15,7 @@ import type { SessionInfo, TranscriptEntry } from '../types/message.js';
 import { listSessions, readTranscript } from '../lib/sessions.js';
 import { getLiveness, type Liveness } from '../lib/liveness.js';
 import { sendToSession } from '../lib/tmux.js';
+import { openSessionInCmux } from '../lib/cmux.js';
 import { disconnectAll } from '../lib/ssh.js';
 import { countLines } from '../lib/wrap.js';
 import { computeSessionUsage, getRateLimits, type RateLimits } from '../lib/usage.js';
@@ -331,6 +332,13 @@ export function App({ config: initialConfig }: Props) {
     void loadSessions(newCfg).then((s) => loadLiveness(s, newCfg));
   };
 
+  const tryOpenInCmux = () => {
+    const s = currentSessionRef.current;
+    if (!s) return;
+    setFlash('opening in cmux...');
+    void openSessionInCmux(s).then((r) => setFlash(r.message));
+  };
+
   const tryEnterInput = () => {
     const s = currentSessionRef.current;
     if (!s) return;
@@ -411,6 +419,7 @@ export function App({ config: initialConfig }: Props) {
         if (key.leftArrow) setPane('filter');
         if (key.rightArrow) setPane('transcript');
         if (input === 'i' || key.return) tryEnterInput();
+        if (input === 'o') tryOpenInCmux();
       } else {
         // transcript pane — scroll the chat view
         const ARROW_STEP = 3;
@@ -433,6 +442,7 @@ export function App({ config: initialConfig }: Props) {
         }
         if (key.leftArrow) setPane('sessions');
         if (input === 'i' || key.return) tryEnterInput();
+        if (input === 'o') tryOpenInCmux();
       }
     },
     { isActive: !inputMode && !configMode },
@@ -574,7 +584,7 @@ export function App({ config: initialConfig }: Props) {
               <Text color="cyan">채팅 모드 · Enter 전송 · Esc 나가기</Text>
             ) : pane === 'transcript' ? (
               <>
-                [Tab] pane · [↑↓] 3줄 · [PgUp/PgDn] 페이지 · [g/G] 처음/최신 · [←] 뒤로 · [i] 채팅 · [q]
+                [Tab] pane · [↑↓] 3줄 · [PgUp/PgDn] 페이지 · [g/G] 처음/최신 · [←] 뒤로 · [i] 채팅 · [o] cmux · [q]
               </>
             ) : pane === 'filter' ? (
               <>
@@ -583,7 +593,7 @@ export function App({ config: initialConfig }: Props) {
               </>
             ) : (
               <>
-                [Tab] pane · [↑↓] nav · [i] 채팅 · [r] refresh ·{' '}
+                [Tab] pane · [↑↓] nav · [i] 채팅 · [o] cmux · [r] refresh ·{' '}
                 <Text color="yellow">●</Text>busy <Text color="green">●</Text>idle ○off · [q] quit
               </>
             )}
