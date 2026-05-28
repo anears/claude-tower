@@ -52,7 +52,7 @@ export function App({ config: initialConfig }: Props) {
   const { stdout } = useStdout();
   const [pane, setPane] = useState<Pane>('sessions');
   const [filterIdx, setFilterIdx] = useState(1); // 0 = Live toggle, 1 = All (default)
-  const [liveOnly, setLiveOnly] = useState(false);
+  const [liveOnly, setLiveOnly] = useState(true);
   const [sessionIdx, setSessionIdx] = useState(0);
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [liveness, setLiveness] = useState<Map<string, Liveness>>(new Map());
