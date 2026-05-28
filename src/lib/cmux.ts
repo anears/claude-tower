@@ -122,16 +122,12 @@ function workspaceTag(session: SessionInfo): string {
   return `${TAG_PREFIX}${session.sessionId}`;
 }
 
-export async function openSessionInCmux(session: SessionInfo): Promise<OpenResult> {
-  if (!session.tmuxTarget) {
-    return { ok: false, action: 'no-tmux', message: '이 세션은 tmux 밖이라 열 수 없음' };
-  }
+export async function openSessionInCmux(
+  session: SessionInfo,
+  servers: ServerConfig[],
+): Promise<OpenResult> {
   if (!(await cmuxAvailable())) {
     return { ok: false, action: 'cmux-unavailable', message: 'cmux CLI 사용 불가' };
-  }
-  const parsed = parseTmuxTarget(session.tmuxTarget);
-  if (!parsed) {
-    return { ok: false, action: 'error', message: `잘못된 tmux 타겟: ${session.tmuxTarget}` };
   }
 
   const tag = workspaceTag(session);
@@ -145,13 +141,53 @@ export async function openSessionInCmux(session: SessionInfo): Promise<OpenResul
     }
   }
 
+  // LIVE path — attach to the actual tmux pane the session runs in.
+  if (session.tmuxTarget) {
+    const parsed = parseTmuxTarget(session.tmuxTarget);
+    if (!parsed) {
+      return { ok: false, action: 'error', message: `잘못된 tmux 타겟: ${session.tmuxTarget}` };
+    }
+    try {
+      await newWorkspace({
+        name: workspaceTitle(session, parsed),
+        description: tag,
+        command: buildLaunchCommand(parsed),
+      });
+      return { ok: true, action: 'opened-new', message: `▶ attached` };
+    } catch (e) {
+      return { ok: false, action: 'error', message: `생성 실패: ${(e as Error).message}` };
+    }
+  }
+
+  // OFFLINE path — resume the session by replaying its JSONL into a new claude.
+  return resumeOfflineSession(session, servers, tag);
+}
+
+async function resumeOfflineSession(
+  session: SessionInfo,
+  servers: ServerConfig[],
+  tag: string,
+): Promise<OpenResult> {
+  const server = servers.find((s) => s.name === session.source);
+  if (!server) {
+    return { ok: false, action: 'error', message: `source 서버 '${session.source}' 미등록` };
+  }
+  // Reuse cwd from the JSONL. If it contains characters we don't shell-escape,
+  // bail rather than silently launching in the wrong directory.
+  const cwdCheck = sanitizeCwd(session.cwd ?? '');
+  if (!cwdCheck.ok) {
+    return { ok: false, action: 'error', message: `cwd 무효: ${cwdCheck.reason}` };
+  }
+  const cwd = cwdCheck.value || '$HOME';
+  const tmuxName = sanitizeTmuxName(`resume-${session.sessionId.slice(0, 8)}`);
+  const launch = `${CLAUDE_INVOCATION} --resume ${session.sessionId}`;
+  const inner = `cd ${cwd} && tmux new -As ${tmuxName} ${launch}`;
+  const command = server.local ? inner : `${sshCommandPrefix(server)} 'bash -lc "${inner}"'`;
+  const cwdLeaf = (session.cwd || '').split('/').filter(Boolean).slice(-1)[0] ?? session.sessionId.slice(0, 8);
+  const title = `${server.name} · ${cwdLeaf}`;
   try {
-    await newWorkspace({
-      name: workspaceTitle(session, parsed),
-      description: tag,
-      command: buildLaunchCommand(parsed),
-    });
-    return { ok: true, action: 'opened-new', message: `▶ cmux 워크스페이스 생성됨` };
+    await newWorkspace({ name: title, description: tag, command });
+    return { ok: true, action: 'opened-new', message: `▶ resumed ${session.sessionId.slice(0, 8)}` };
   } catch (e) {
     return { ok: false, action: 'error', message: `생성 실패: ${(e as Error).message}` };
   }

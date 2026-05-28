@@ -336,8 +336,8 @@ export function App({ config: initialConfig }: Props) {
   const tryOpenInCmux = () => {
     const s = currentSessionRef.current;
     if (!s) return;
-    setFlash('opening in cmux...');
-    void openSessionInCmux(s).then((r) => setFlash(r.message));
+    setFlash(s.tmuxTarget ? 'opening in cmux...' : 'resuming offline session...');
+    void openSessionInCmux(s, config.servers).then((r) => setFlash(r.message));
   };
 
   // ---- Launch new session in tmux ------------------------------------------
