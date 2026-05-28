@@ -187,8 +187,23 @@ function sshCommandPrefix(server: ServerConfig): string {
   return parts.join(' ');
 }
 
-function buildNewSessionCommand(server: ServerConfig, sessionName: string): string {
-  const inner = `tmux new -As ${sessionName} ${CLAUDE_INVOCATION}`;
+// Allow only safe path characters so we can pass `-c <path>` bare (no quoting
+// gymnastics across ssh + bash -lc + tmux). Covers almost all real project
+// paths; users with spaces / specials in paths would need to rename or wrap.
+const SAFE_CWD = /^[\w./\-~]+$/;
+
+export function sanitizeCwd(raw: string): { ok: true; value: string } | { ok: false; reason: string } {
+  const t = raw.trim();
+  if (t === '') return { ok: true, value: '' }; // default = home
+  if (!SAFE_CWD.test(t)) {
+    return { ok: false, reason: '경로에 허용되지 않는 문자 (스페이스/특수문자 X)' };
+  }
+  return { ok: true, value: t };
+}
+
+function buildNewSessionCommand(server: ServerConfig, sessionName: string, cwd: string): string {
+  const cwdFlag = cwd ? ` -c ${cwd}` : '';
+  const inner = `tmux new -As ${sessionName}${cwdFlag} ${CLAUDE_INVOCATION}`;
   if (server.local) return inner;
   // bash -lc forces a login shell so PATH (claude is in ~/.local/bin) is set
   // the same way as the user's interactive remote shell.
@@ -198,13 +213,19 @@ function buildNewSessionCommand(server: ServerConfig, sessionName: string): stri
 export async function newSessionInCmux(
   server: ServerConfig,
   rawName?: string,
+  rawCwd?: string,
 ): Promise<OpenResult> {
   if (!(await cmuxAvailable())) {
     return { ok: false, action: 'cmux-unavailable', message: 'cmux CLI 사용 불가' };
   }
+  const cwdResult = sanitizeCwd(rawCwd ?? '');
+  if (!cwdResult.ok) {
+    return { ok: false, action: 'error', message: cwdResult.reason };
+  }
   const name = sanitizeTmuxName(rawName || defaultSessionName());
-  const command = buildNewSessionCommand(server, name);
-  const title = `${server.name} · ${name}`;
+  const command = buildNewSessionCommand(server, name, cwdResult.value);
+  const titleSuffix = cwdResult.value ? ` @ ${cwdResult.value.split('/').filter(Boolean).slice(-1)[0] ?? cwdResult.value}` : '';
+  const title = `${server.name} · ${name}${titleSuffix}`;
   // Tag prefix differs so we don't conflate "open existing" with "launch new"
   const description = `agent-view:new-claude:${server.name}:${name}`;
   try {

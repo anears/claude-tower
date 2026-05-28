@@ -35,7 +35,7 @@ interface Props {
 type ConfigMode =
   | { kind: 'add'; step: number; draft: Partial<ServerConfig>; value: string }
   | { kind: 'delete'; serverName: string }
-  | { kind: 'newSession'; step: number; draft: { server?: string; name?: string }; value: string }
+  | { kind: 'newSession'; step: number; draft: { server?: string; cwd?: string; name?: string }; value: string }
   | null;
 
 const ADD_STEPS: Array<keyof ServerConfig> = ['name', 'host', 'username', 'privateKeyPath'];
@@ -357,24 +357,35 @@ export function App({ config: initialConfig }: Props) {
         setConfigMode(null);
         return;
       }
+      setConfigMode({ kind: 'newSession', step: 1, draft: { server: serverName }, value: '' });
+      return;
+    }
+    if (configMode.step === 1) {
+      // cwd validation: empty = default (home); reject unsafe characters
+      if (v && !/^[\w./\-~]+$/.test(v)) {
+        setFlash('경로 무효: 스페이스/특수문자는 미지원');
+        setConfigMode(null);
+        return;
+      }
       setConfigMode({
         kind: 'newSession',
-        step: 1,
-        draft: { server: serverName },
+        step: 2,
+        draft: { ...configMode.draft, cwd: v },
         value: '',
       });
       return;
     }
-    // step 1: session name (empty → default)
+    // step 2: session name (empty → default)
     const server = config.servers.find((s) => s.name === configMode.draft.server);
     if (!server) {
       setFlash('서버를 찾지 못함');
       setConfigMode(null);
       return;
     }
+    const cwd = configMode.draft.cwd ?? '';
     setConfigMode(null);
     setFlash('launching...');
-    const r = await newSessionInCmux(server, v);
+    const r = await newSessionInCmux(server, v, cwd);
     setFlash(r.message);
   };
 
@@ -625,10 +636,12 @@ export function App({ config: initialConfig }: Props) {
         ) : configMode?.kind === 'newSession' ? (
           <Box>
             <Text color="cyan">
-              New session ({configMode.step + 1}/2){' '}
+              New session ({configMode.step + 1}/3){' '}
               {configMode.step === 0
                 ? `서버 (${config.servers.map((s) => s.name).join('|')}, Enter=local)`
-                : `세션 이름 (Enter=${defaultSessionName()})`}
+                : configMode.step === 1
+                  ? '경로 (Enter=홈)'
+                  : `세션 이름 (Enter=${defaultSessionName()})`}
               :{' '}
             </Text>
             <TextInput
@@ -638,7 +651,13 @@ export function App({ config: initialConfig }: Props) {
               }
               onSubmit={advanceNewSession}
               focus
-              placeholder={configMode.step === 0 ? 'local' : defaultSessionName()}
+              placeholder={
+                configMode.step === 0
+                  ? 'local'
+                  : configMode.step === 1
+                    ? '~/project/foo (선택)'
+                    : defaultSessionName()
+              }
             />
           </Box>
         ) : (
