@@ -9,6 +9,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { ServerConfig } from '../config.js';
 import type { SessionInfo } from '../types/message.js';
 
 const execFileP = promisify(execFile);
@@ -151,6 +152,64 @@ export async function openSessionInCmux(session: SessionInfo): Promise<OpenResul
       command: buildLaunchCommand(parsed),
     });
     return { ok: true, action: 'opened-new', message: `▶ cmux 워크스페이스 생성됨` };
+  } catch (e) {
+    return { ok: false, action: 'error', message: `생성 실패: ${(e as Error).message}` };
+  }
+}
+
+// ---- Launch a brand-new claude session, always inside tmux -----------------
+// Goal: future sessions are controllable (i/o keys work) because they live in
+// a known tmux session from the start. Builds `tmux new -As <name> claude`
+// and runs it via ssh (or locally), in a fresh cmux workspace.
+
+const CLAUDE_INVOCATION = 'claude --dangerously-skip-permissions';
+
+function sanitizeTmuxName(raw: string): string {
+  // tmux session names: keep alphanumerics, hyphen, underscore. Replace others.
+  const cleaned = raw.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || defaultSessionName();
+}
+
+export function defaultSessionName(): string {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `claude-${hh}${mm}`;
+}
+
+function sshCommandPrefix(server: ServerConfig): string {
+  // Explicit form so it works regardless of ~/.ssh/config. Force a pty (-t)
+  // because tmux needs one.
+  const parts = ['ssh', '-t'];
+  if (server.privateKeyPath) parts.push('-i', server.privateKeyPath);
+  if (server.port && server.port !== 22) parts.push('-p', String(server.port));
+  parts.push(server.username ? `${server.username}@${server.host}` : server.host);
+  return parts.join(' ');
+}
+
+function buildNewSessionCommand(server: ServerConfig, sessionName: string): string {
+  const inner = `tmux new -As ${sessionName} ${CLAUDE_INVOCATION}`;
+  if (server.local) return inner;
+  // bash -lc forces a login shell so PATH (claude is in ~/.local/bin) is set
+  // the same way as the user's interactive remote shell.
+  return `${sshCommandPrefix(server)} 'bash -lc "${inner}"'`;
+}
+
+export async function newSessionInCmux(
+  server: ServerConfig,
+  rawName?: string,
+): Promise<OpenResult> {
+  if (!(await cmuxAvailable())) {
+    return { ok: false, action: 'cmux-unavailable', message: 'cmux CLI 사용 불가' };
+  }
+  const name = sanitizeTmuxName(rawName || defaultSessionName());
+  const command = buildNewSessionCommand(server, name);
+  const title = `${server.name} · ${name}`;
+  // Tag prefix differs so we don't conflate "open existing" with "launch new"
+  const description = `agent-view:new-claude:${server.name}:${name}`;
+  try {
+    await newWorkspace({ name: title, description, command });
+    return { ok: true, action: 'opened-new', message: `▶ ${title}` };
   } catch (e) {
     return { ok: false, action: 'error', message: `생성 실패: ${(e as Error).message}` };
   }

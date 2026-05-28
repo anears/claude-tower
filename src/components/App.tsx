@@ -15,7 +15,7 @@ import type { SessionInfo, TranscriptEntry } from '../types/message.js';
 import { listSessions, readTranscript } from '../lib/sessions.js';
 import { getLiveness, type Liveness } from '../lib/liveness.js';
 import { sendToSession } from '../lib/tmux.js';
-import { openSessionInCmux } from '../lib/cmux.js';
+import { openSessionInCmux, newSessionInCmux, defaultSessionName } from '../lib/cmux.js';
 import { disconnectAll } from '../lib/ssh.js';
 import { countLines } from '../lib/wrap.js';
 import { computeSessionUsage, getRateLimits, type RateLimits } from '../lib/usage.js';
@@ -35,6 +35,7 @@ interface Props {
 type ConfigMode =
   | { kind: 'add'; step: number; draft: Partial<ServerConfig>; value: string }
   | { kind: 'delete'; serverName: string }
+  | { kind: 'newSession'; step: number; draft: { server?: string; name?: string }; value: string }
   | null;
 
 const ADD_STEPS: Array<keyof ServerConfig> = ['name', 'host', 'username', 'privateKeyPath'];
@@ -339,6 +340,44 @@ export function App({ config: initialConfig }: Props) {
     void openSessionInCmux(s).then((r) => setFlash(r.message));
   };
 
+  // ---- Launch new session in tmux ------------------------------------------
+  const startNewSession = () => {
+    setFlash(undefined);
+    setConfigMode({ kind: 'newSession', step: 0, draft: {}, value: '' });
+  };
+
+  const advanceNewSession = async (val: string) => {
+    if (configMode?.kind !== 'newSession') return;
+    const v = val.trim();
+    if (configMode.step === 0) {
+      const serverName = v || 'local';
+      const server = config.servers.find((s) => s.name === serverName);
+      if (!server) {
+        setFlash(`서버 없음: '${serverName}' (가능: ${config.servers.map((s) => s.name).join(', ')})`);
+        setConfigMode(null);
+        return;
+      }
+      setConfigMode({
+        kind: 'newSession',
+        step: 1,
+        draft: { server: serverName },
+        value: '',
+      });
+      return;
+    }
+    // step 1: session name (empty → default)
+    const server = config.servers.find((s) => s.name === configMode.draft.server);
+    if (!server) {
+      setFlash('서버를 찾지 못함');
+      setConfigMode(null);
+      return;
+    }
+    setConfigMode(null);
+    setFlash('launching...');
+    const r = await newSessionInCmux(server, v);
+    setFlash(r.message);
+  };
+
   const tryEnterInput = () => {
     const s = currentSessionRef.current;
     if (!s) return;
@@ -412,6 +451,10 @@ export function App({ config: initialConfig }: Props) {
           startDeleteServer();
           return;
         }
+        if (input === 'n') {
+          startNewSession();
+          return;
+        }
         if (key.rightArrow || key.return) setPane('sessions');
       } else if (pane === 'sessions') {
         if (key.upArrow) setSessionIdx((i) => Math.max(0, i - 1));
@@ -420,6 +463,7 @@ export function App({ config: initialConfig }: Props) {
         if (key.rightArrow) setPane('transcript');
         if (input === 'i' || key.return) tryEnterInput();
         if (input === 'o') tryOpenInCmux();
+        if (input === 'n') startNewSession();
       } else {
         // transcript pane — scroll the chat view
         const ARROW_STEP = 3;
@@ -578,6 +622,25 @@ export function App({ config: initialConfig }: Props) {
             <Text bold>{configMode.serverName}</Text>
             <Text color="red">? [y/n]</Text>
           </Text>
+        ) : configMode?.kind === 'newSession' ? (
+          <Box>
+            <Text color="cyan">
+              New session ({configMode.step + 1}/2){' '}
+              {configMode.step === 0
+                ? `서버 (${config.servers.map((s) => s.name).join('|')}, Enter=local)`
+                : `세션 이름 (Enter=${defaultSessionName()})`}
+              :{' '}
+            </Text>
+            <TextInput
+              value={configMode.value}
+              onChange={(v) =>
+                setConfigMode((m) => (m?.kind === 'newSession' ? { ...m, value: v } : m))
+              }
+              onSubmit={advanceNewSession}
+              focus
+              placeholder={configMode.step === 0 ? 'local' : defaultSessionName()}
+            />
+          </Box>
         ) : (
           <Text dimColor wrap="truncate-end">
             {inputMode ? (
@@ -588,12 +651,12 @@ export function App({ config: initialConfig }: Props) {
               </>
             ) : pane === 'filter' ? (
               <>
-                [Tab] pane · [↑↓] nav · [Space] toggle · [a] 추가 · [d] 삭제 · [r] refresh ·{' '}
+                [Tab] pane · [↑↓] nav · [Space] toggle · [a] 추가 · [d] 삭제 · [n] 새 세션 · [r] refresh ·{' '}
                 <Text color="yellow">●</Text>busy <Text color="green">●</Text>idle ○off · [q] quit
               </>
             ) : (
               <>
-                [Tab] pane · [↑↓] nav · [i] 채팅 · [o] cmux · [r] refresh ·{' '}
+                [Tab] pane · [↑↓] nav · [i] 채팅 · [o] cmux · [n] 새 세션 · [r] refresh ·{' '}
                 <Text color="yellow">●</Text>busy <Text color="green">●</Text>idle ○off · [q] quit
               </>
             )}
