@@ -202,8 +202,11 @@ export function sanitizeCwd(raw: string): { ok: true; value: string } | { ok: fa
 }
 
 function buildNewSessionCommand(server: ServerConfig, sessionName: string, cwd: string): string {
-  const cwdFlag = cwd ? ` -c ${cwd}` : '';
-  const inner = `tmux new -As ${sessionName}${cwdFlag} ${CLAUDE_INVOCATION}`;
+  // Use `cd && tmux` instead of tmux's own `-c` flag. tmux's -c silently falls
+  // back to $HOME when the path doesn't exist; `cd` fails loud so the user
+  // sees a clear error in the cmux workspace's terminal.
+  const launch = `tmux new -As ${sessionName} ${CLAUDE_INVOCATION}`;
+  const inner = cwd ? `cd ${cwd} && ${launch}` : launch;
   if (server.local) return inner;
   // bash -lc forces a login shell so PATH (claude is in ~/.local/bin) is set
   // the same way as the user's interactive remote shell.
