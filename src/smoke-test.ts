@@ -2,6 +2,7 @@ import { loadConfig } from './config.js';
 import { listSessions, readTranscript } from './lib/sessions.js';
 import { getLiveness } from './lib/liveness.js';
 import { disconnectAll } from './lib/ssh.js';
+import { computeTranscriptStats } from './lib/transcript-stats.js';
 import type { SessionInfo } from './types/message.js';
 
 async function main() {
@@ -40,17 +41,7 @@ async function main() {
 
   if (sessions[0]) {
     const entries = await readTranscript(primary, sessions[0].filePath);
-    let turns = 0;
-    let outTokens = 0;
-    for (const e of entries) {
-      if (e.type === 'user') {
-        const c = e.message.content;
-        const hasText = typeof c === 'string' ? c.trim().length > 0 : c.some((b) => b.type === 'text');
-        if (hasText) turns++;
-      } else if (e.type === 'assistant') {
-        outTokens += e.message.usage?.output_tokens ?? 0;
-      }
-    }
+    const { turns, outTokens } = computeTranscriptStats(entries);
     console.log(
       `\nDetail of [0]: ${entries.length} entries · ${turns} turns · ${outTokens} out-tokens · title="${sessions[0].aiTitle ?? ''}"`,
     );

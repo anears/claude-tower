@@ -1,4 +1,5 @@
 import { exec } from './ssh.js';
+import { splitHostTarget } from './tmux-target.js';
 import type { ServerConfig } from '../config.js';
 
 // Send a line of text to a live session's tmux pane, as if typed + Enter.
@@ -11,10 +12,9 @@ export async function sendToSession(
   hostTarget: string,
   text: string,
 ): Promise<void> {
-  const sep = hostTarget.indexOf(':');
-  if (sep < 0) throw new Error(`malformed tmux target: ${hostTarget}`);
-  const host = hostTarget.slice(0, sep);
-  const target = hostTarget.slice(sep + 1);
+  const split = splitHostTarget(hostTarget);
+  if (!split) throw new Error(`malformed tmux target: ${hostTarget}`);
+  const { host, target } = split;
   const server = servers.find((s) => s.name === host);
   if (!server) throw new Error(`no configured server named ${host}`);
 

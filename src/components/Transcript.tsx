@@ -4,6 +4,7 @@ import Spinner from 'ink-spinner';
 import type { TranscriptEntry } from '../types/message.js';
 import { markdownToLines, type MdLine } from '../lib/markdown.js';
 import { formatToolUse, formatToolResult } from '../lib/tool-format.js';
+import { UI } from '../constants.js';
 
 interface Props {
   entries: TranscriptEntry[];
@@ -72,7 +73,7 @@ export function Transcript({
   scrollOffset = 0,
   onClamp,
 }: Props) {
-  const innerWidth = Math.max(10, width - 4); // borders (2) + paddingX (2)
+  const innerWidth = Math.max(10, width - UI.transcriptBorderPad); // borders (2) + paddingX (2)
   const headerLines = 1; // single scroll-position hint line
   const maxLines = Math.max(3, height - 2 - headerLines); // borders (2) + header
 

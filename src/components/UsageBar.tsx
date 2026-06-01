@@ -1,15 +1,9 @@
 import { Box, Text } from 'ink';
 import type { RateLimits, RateWindow } from '../lib/usage.js';
-import { bar, untilReset } from '../lib/usage.js';
+import { bar, untilReset, pctColor } from '../lib/usage.js';
 
 interface Props {
   limits?: RateLimits;
-}
-
-function pctColor(p: number): string {
-  if (p >= 90) return 'red';
-  if (p >= 70) return 'yellow';
-  return 'green';
 }
 
 function Segment({ label, win }: { label: string; win?: RateWindow }) {

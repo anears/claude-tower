@@ -1,5 +1,7 @@
 import { exec } from './ssh.js';
 import { pyCommand } from './remote.js';
+import { ENUM_SCRIPT, DARWIN_ENUM_SCRIPT, parseEnumLine, type EnumProc } from './remote-scripts.js';
+import { formatHostTarget } from './tmux-target.js';
 import type { ServerConfig } from '../config.js';
 import type { SessionInfo } from '../types/message.js';
 
@@ -45,112 +47,17 @@ export async function getSessionRegistry(server: ServerConfig): Promise<Registry
 
 // ---- Running-process enumeration (authoritative liveness) -------------------
 // Lists every live `claude` process with its cwd and, if it runs inside tmux,
-// the pane target for send-keys. Output: "<pid>|<cwd>|<tmuxTarget>" per line.
-//
-// Linux/proc variant — used for remote servers and for a local server on Linux.
-const ENUM_SCRIPT = `import os, sys
-panes = {}
-try:
-    for line in os.popen("tmux list-panes -a -F '#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null"):
-        line = line.strip()
-        if not line: continue
-        parts = line.split('|', 1)
-        if len(parts) == 2: panes[parts[0]] = parts[1]
-except Exception:
-    pass
-def ppid_of(pid):
-    try:
-        s = open('/proc/' + pid + '/stat').read()
-        s = s[s.rfind(')') + 2:]
-        return s.split()[1]
-    except Exception:
-        return None
-def find_target(pid):
-    cur = pid
-    for _ in range(30):
-        if not cur or cur == '1': break
-        if cur in panes: return panes[cur]
-        cur = ppid_of(cur)
-    return ''
-for d in os.listdir('/proc'):
-    if not d.isdigit(): continue
-    try:
-        comm = open('/proc/' + d + '/comm').read().strip()
-    except Exception:
-        continue
-    if comm != 'claude': continue
-    try:
-        cwd = os.readlink('/proc/' + d + '/cwd')
-    except Exception:
-        cwd = ''
-    print(d + '|' + cwd + '|' + find_target(d))
-`;
-
-// macOS variant — no /proc, so we drive enumeration from the session registry
-// and verify with kill(pid, 0). Walks the tmux parent chain via `ps -o ppid=`.
-const DARWIN_ENUM_SCRIPT = `import os, json, glob, subprocess
-panes = {}
-try:
-    out = subprocess.check_output(
-        ['tmux', 'list-panes', '-a', '-F', '#{pane_pid}|#{session_name}:#{window_index}.#{pane_index}'],
-        stderr=subprocess.DEVNULL, text=True,
-    )
-    for line in out.splitlines():
-        line = line.strip()
-        if not line: continue
-        parts = line.split('|', 1)
-        if len(parts) == 2: panes[parts[0]] = parts[1]
-except Exception:
-    pass
-def ppid_of(pid):
-    try:
-        return subprocess.check_output(['ps', '-o', 'ppid=', '-p', str(pid)],
-                                       stderr=subprocess.DEVNULL, text=True).strip()
-    except Exception:
-        return None
-def find_target(pid):
-    cur = str(pid)
-    for _ in range(30):
-        if not cur or cur == '1': break
-        if cur in panes: return panes[cur]
-        cur = ppid_of(cur)
-    return ''
-for f in glob.glob(os.path.expanduser('~/.claude/sessions/*.json')):
-    try:
-        with open(f) as fh: o = json.load(fh)
-        pid = o.get('pid')
-        cwd = o.get('cwd', '')
-        if not pid: continue
-        try:
-            os.kill(int(pid), 0)
-        except (ProcessLookupError, PermissionError):
-            continue
-        print(str(pid) + '|' + cwd + '|' + find_target(pid))
-    except Exception:
-        pass
-`;
-
-interface ClaudeProc {
-  pid: number;
-  cwd: string;
-  target: string; // tmux target within the server, or ''
-}
-
-async function enumerateClaude(server: ServerConfig): Promise<ClaudeProc[]> {
-  const out: ClaudeProc[] = [];
+// the pane target for send-keys. The platform scripts and the "<pid>|<cwd>|
+// <target>" line parser live in remote-scripts.ts.
+async function enumerateClaude(server: ServerConfig): Promise<EnumProc[]> {
+  const out: EnumProc[] = [];
   // Local Mac has no /proc — drive enumeration from the session registry instead.
   const script = server.local && process.platform === 'darwin' ? DARWIN_ENUM_SCRIPT : ENUM_SCRIPT;
   try {
     const { stdout } = await exec(server, pyCommand(script));
     for (const line of stdout.split('\n')) {
-      const t = line.trim();
-      if (!t) continue;
-      const i1 = t.indexOf('|');
-      const i2 = t.indexOf('|', i1 + 1);
-      if (i1 < 0 || i2 < 0) continue;
-      const pid = parseInt(t.slice(0, i1), 10);
-      if (Number.isNaN(pid)) continue;
-      out.push({ pid, cwd: t.slice(i1 + 1, i2), target: t.slice(i2 + 1) });
+      const p = parseEnumLine(line);
+      if (p) out.push(p);
     }
   } catch {
     // ignore
@@ -192,7 +99,7 @@ export async function getLiveness(
       const cur = map.get(sessionId) ?? { liveOn: [] as string[] };
       if (!cur.liveOn.includes(name)) cur.liveOn.push(name);
       cur.status = reg?.status ?? cur.status ?? 'running';
-      if (p.target) cur.tmuxTarget = `${name}:${p.target}`;
+      if (p.target) cur.tmuxTarget = formatHostTarget(name, p.target);
       map.set(sessionId, cur);
     }
   }

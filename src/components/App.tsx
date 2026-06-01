@@ -6,45 +6,29 @@ import { Transcript } from './Transcript.js';
 import { SessionInfoPanel } from './SessionInfo.js';
 import { Composer } from './Composer.js';
 import { UsageBar } from './UsageBar.js';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import TextInput from 'ink-text-input';
+import { FlowPrompt } from './FlowPrompt.js';
 import type { Config, ServerConfig } from '../config.js';
-import { saveConfig } from '../config.js';
-import type { SessionInfo, TranscriptEntry } from '../types/message.js';
-import { listSessions, readTranscript } from '../lib/sessions.js';
-import { getLiveness, type Liveness } from '../lib/liveness.js';
+import type { SessionInfo } from '../types/message.js';
 import { sendToSession } from '../lib/tmux.js';
-import { openSessionInCmux, newSessionInCmux, defaultSessionName } from '../lib/cmux.js';
+import { openSessionInCmux } from '../lib/cmux.js';
 import { disconnectAll } from '../lib/ssh.js';
 import { countLines } from '../lib/wrap.js';
-import { computeSessionUsage, getRateLimits, type RateLimits } from '../lib/usage.js';
-import { usePolling } from '../hooks/usePolling.js';
+import { computeSessionUsage } from '../lib/usage.js';
+import { computeTranscriptStats } from '../lib/transcript-stats.js';
+import { UI } from '../constants.js';
+import { useSessions } from '../hooks/useSessions.js';
+import { useLiveness } from '../hooks/useLiveness.js';
+import { useRateLimits } from '../hooks/useRateLimits.js';
+import { useTranscript } from '../hooks/useTranscript.js';
+import { useFlow } from '../hooks/useFlow.js';
+import { addServerFlow, deleteServerFlow } from '../lib/flows/serverFlows.js';
+import { newSessionFlow } from '../lib/flows/sessionFlows.js';
 
 type Pane = 'filter' | 'sessions' | 'transcript';
-
-const LIVENESS_INTERVAL = 3000;
-const SESSIONS_INTERVAL = 15000;
-const TRANSCRIPT_INTERVAL = 3000;
-const RATE_LIMITS_INTERVAL = 60_000;
 
 interface Props {
   config: Config;
 }
-
-type ConfigMode =
-  | { kind: 'add'; step: number; draft: Partial<ServerConfig>; value: string }
-  | { kind: 'delete'; serverName: string }
-  | { kind: 'newSession'; step: number; draft: { server?: string; cwd?: string; name?: string }; value: string }
-  | null;
-
-const ADD_STEPS: Array<keyof ServerConfig> = ['name', 'host', 'username', 'privateKeyPath'];
-const ADD_LABELS: Record<string, string> = {
-  name: '이름 (예: f7)',
-  host: '호스트 (IP 또는 SSH alias)',
-  username: '사용자명',
-  privateKeyPath: '개인키 경로 (Enter면 기본값)',
-};
 
 export function App({ config: initialConfig }: Props) {
   const [config, setConfig] = useState<Config>(initialConfig);
@@ -54,57 +38,21 @@ export function App({ config: initialConfig }: Props) {
   const [filterIdx, setFilterIdx] = useState(1); // 0 = Live toggle, 1 = All (default)
   const [liveOnly, setLiveOnly] = useState(true);
   const [sessionIdx, setSessionIdx] = useState(0);
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
-  const [liveness, setLiveness] = useState<Map<string, Liveness>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | undefined>();
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const [transcriptLoading, setTranscriptLoading] = useState(false);
-  const [transcriptError, setTranscriptError] = useState<string | undefined>();
   const [inputMode, setInputMode] = useState(false);
   const [inputValue, setInputValue] = useState('');
   const [flash, setFlash] = useState<string | undefined>();
-  const [transcriptScroll, setTranscriptScroll] = useState(0);
-  const transcriptScrollRef = useRef(0);
-  transcriptScrollRef.current = transcriptScroll;
-  const [rateLimits, setRateLimits] = useState<RateLimits | undefined>();
-  const [configMode, setConfigMode] = useState<ConfigMode>(null);
 
   // Cluster-wide list comes from one server (NFS-shared home); liveness is
-  // gathered from every server.
+  // gathered from every server. Each concern owns its own polling + refs.
+  const sessions_h = useSessions(config);
+  const allSessions = sessions_h.allSessions;
+  const liveness_h = useLiveness(config, allSessions);
+  const liveness = liveness_h.liveness;
+  const rate = useRateLimits();
+
   const primary: ServerConfig | undefined = config.servers[0];
-
-  const allSessionsRef = useRef<SessionInfo[]>([]);
-  allSessionsRef.current = allSessions;
-
-  // Fetch from every configured server in parallel and dedupe by sessionId.
-  // Cluster servers sharing NFS will return identical entries — the first one
-  // wins (its `source` field marks where transcript reads will go). Local
-  // sessions are kept distinct since they live on a different filesystem.
-  const loadSessions = async (cfg: Config = config): Promise<SessionInfo[]> => {
-    if (cfg.servers.length === 0) return [];
-    const results = await Promise.all(
-      cfg.servers.map(async (s) => {
-        try {
-          return await listSessions(s);
-        } catch {
-          return [];
-        }
-      }),
-    );
-    const seen = new Set<string>();
-    const merged: SessionInfo[] = [];
-    for (const list of results) {
-      for (const s of list) {
-        if (seen.has(s.sessionId)) continue;
-        seen.add(s.sessionId);
-        merged.push(s);
-      }
-    }
-    merged.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
-    setAllSessions(merged);
-    return merged;
-  };
 
   // Lookup a server by name (for transcript reads that target the session's source).
   const serverByName = useMemo(() => {
@@ -112,17 +60,20 @@ export function App({ config: initialConfig }: Props) {
     for (const s of config.servers) m.set(s.name, s);
     return m;
   }, [config.servers]);
-  const loadLiveness = async (sessionsForMatch: SessionInfo[], cfg: Config = config) => {
-    setLiveness(await getLiveness(cfg.servers, sessionsForMatch));
+
+  // Refresh sessions then liveness for a (possibly new) config — fire-and-forget.
+  const reloadAfterConfig = (cfg: Config): void => {
+    void sessions_h.reload(cfg).then((s) => liveness_h.reload(s, cfg));
   };
 
-  // Initial load — sessions first so liveness can map unregistered processes by cwd.
+  // Initial load — sessions first so liveness can map unregistered processes by
+  // cwd; gate the loading screen on sessions + liveness + rate limits.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const s = await loadSessions();
-        if (!cancelled) await Promise.all([loadLiveness(s), loadRateLimits()]);
+        const s = await sessions_h.reload();
+        if (!cancelled) await Promise.all([liveness_h.reload(s), rate.reload()]);
       } catch (err) {
         if (!cancelled) setLoadError((err as Error).message ?? String(err));
       } finally {
@@ -132,19 +83,8 @@ export function App({ config: initialConfig }: Props) {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const loadRateLimits = async () => {
-    const r = await getRateLimits();
-    if (r) setRateLimits(r);
-  };
-
-  // Background refresh: liveness/status fast, full list slower.
-  usePolling(() => loadLiveness(allSessionsRef.current), LIVENESS_INTERVAL);
-  usePolling(async () => {
-    await loadSessions();
-  }, SESSIONS_INTERVAL);
-  usePolling(loadRateLimits, RATE_LIMITS_INTERVAL);
 
   // Enrich + filter for display.
   const sessions: SessionInfo[] = useMemo(() => {
@@ -178,126 +118,31 @@ export function App({ config: initialConfig }: Props) {
   const currentSessionRef = useRef(currentSession);
   currentSessionRef.current = currentSession;
 
+  const sourceServer = currentSession ? serverByName.get(currentSession.source) : undefined;
+  const transcript = useTranscript(sourceServer, currentSession);
+
   const transcriptMeta = useMemo(() => {
-    let turns = 0;
-    let outTokens = 0;
-    for (const e of transcript) {
-      if (e.type === 'user') {
-        const c = e.message.content;
-        const hasText = typeof c === 'string' ? c.trim().length > 0 : c.some((b) => b.type === 'text');
-        if (hasText) turns++;
-      } else if (e.type === 'assistant') {
-        outTokens += e.message.usage?.output_tokens ?? 0;
-      }
-    }
+    const { turns, outTokens } = computeTranscriptStats(transcript.entries);
     return {
       title: currentSession?.aiTitle,
       gitBranch: currentSession?.gitBranch,
       turns,
       outTokens,
-      usage: computeSessionUsage(transcript),
+      usage: computeSessionUsage(transcript.entries),
     };
-  }, [transcript, currentSession?.aiTitle, currentSession?.gitBranch]);
+  }, [transcript.entries, currentSession?.aiTitle, currentSession?.gitBranch]);
 
   // Clamp selection when the filtered list shrinks.
   useEffect(() => {
     if (sessionIdx > sessions.length - 1) setSessionIdx(Math.max(0, sessions.length - 1));
   }, [sessions.length]);
 
-  // Fetch transcript immediately when the selected session changes.
-  useEffect(() => {
-    const sourceServer = currentSession ? serverByName.get(currentSession.source) : undefined;
-    if (!sourceServer || !currentSession) {
-      setTranscript([]);
-      return;
-    }
-    let cancelled = false;
-    const filePath = currentSession.filePath;
-    setTranscriptScroll(0); // new session → back to tailing latest
-    setTranscriptLoading(true);
-    setTranscriptError(undefined);
-    readTranscript(sourceServer, filePath)
-      .then((t) => {
-        if (!cancelled && currentSessionRef.current?.filePath === filePath) {
-          setTranscript(t);
-          setTranscriptLoading(false);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setTranscriptError((err as Error).message ?? String(err));
-          setTranscriptLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [currentSession?.filePath]);
+  // ---- Flows (add/delete server, new session) ------------------------------
+  const flow = useFlow(setFlash);
 
-  // Background refresh of the transcript — only while the selected session is
-  // live (idle/offline transcripts don't change), and without a loading flag so
-  // the view tails new output without flicker.
-  usePolling(async () => {
-    const s = currentSessionRef.current;
-    if (!s || s.liveOn.length === 0) return;
-    if (transcriptScrollRef.current > 0) return; // user is reading old content
-    const sourceServer = serverByName.get(s.source);
-    if (!sourceServer) return;
-    const filePath = s.filePath;
-    const t = await readTranscript(sourceServer, filePath);
-    if (currentSessionRef.current?.filePath === filePath && transcriptScrollRef.current === 0) {
-      setTranscript(t);
-    }
-  }, TRANSCRIPT_INTERVAL);
-
-  // ---- Server add / delete -------------------------------------------------
   const startAddServer = () => {
     setFlash(undefined);
-    setConfigMode({ kind: 'add', step: 0, draft: {}, value: '' });
-  };
-
-  const advanceAddServer = async (val: string) => {
-    if (configMode?.kind !== 'add') return;
-    const key = ADD_STEPS[configMode.step];
-    const v = val.trim();
-    const draft = { ...configMode.draft, [key]: v };
-    const nextStep = configMode.step + 1;
-    if (nextStep < ADD_STEPS.length) {
-      setConfigMode({ kind: 'add', step: nextStep, draft, value: '' });
-      return;
-    }
-    // Build the new server
-    const newServer: ServerConfig = {
-      name: (draft.name as string) || '',
-      host: (draft.host as string) || '',
-      port: 22,
-      username: (draft.username as string) || '',
-      privateKeyPath: (draft.privateKeyPath as string) || join(homedir(), '.ssh', 'id_ed25519'),
-      remoteClaudeDir: '~/.claude',
-      local: false,
-    };
-    if (!newServer.name || !newServer.host || !newServer.username) {
-      setFlash('필수값 누락 (이름/호스트/사용자명)');
-      setConfigMode(null);
-      return;
-    }
-    if (config.servers.some((s) => s.name === newServer.name)) {
-      setFlash(`'${newServer.name}' 은 이미 존재함`);
-      setConfigMode(null);
-      return;
-    }
-    const newCfg: Config = { servers: [...config.servers, newServer] };
-    try {
-      await saveConfig(newCfg);
-    } catch (e) {
-      setFlash(`저장 실패: ${(e as Error).message}`);
-      setConfigMode(null);
-      return;
-    }
-    setConfig(newCfg);
-    setConfigMode(null);
-    setFlash(`✓ 추가됨: ${newServer.name}`);
-    void loadSessions(newCfg).then((s) => loadLiveness(s, newCfg));
+    flow.start(addServerFlow({ config, applyConfig: setConfig, reload: reloadAfterConfig }));
   };
 
   const startDeleteServer = () => {
@@ -312,25 +157,20 @@ export function App({ config: initialConfig }: Props) {
       setFlash('로컬 서버는 삭제할 수 없음');
       return;
     }
-    setConfigMode({ kind: 'delete', serverName: srv.name });
+    flow.start(
+      deleteServerFlow(srv.name, {
+        config,
+        applyConfig: setConfig,
+        reload: reloadAfterConfig,
+        afterDelete: (newCfg) =>
+          setFilterIdx((i) => Math.max(0, Math.min(i, newCfg.servers.length /* incl Live toggle + All */))),
+      }),
+    );
   };
 
-  const confirmDeleteServer = async () => {
-    if (configMode?.kind !== 'delete') return;
-    const newCfg: Config = { servers: config.servers.filter((s) => s.name !== configMode.serverName) };
-    try {
-      await saveConfig(newCfg);
-    } catch (e) {
-      setFlash(`삭제 저장 실패: ${(e as Error).message}`);
-      setConfigMode(null);
-      return;
-    }
-    const removed = configMode.serverName;
-    setConfig(newCfg);
-    setConfigMode(null);
-    setFilterIdx((i) => Math.max(0, Math.min(i, newCfg.servers.length /* incl Live toggle + All */)));
-    setFlash(`✓ 삭제됨: ${removed}`);
-    void loadSessions(newCfg).then((s) => loadLiveness(s, newCfg));
+  const startNewSession = () => {
+    setFlash(undefined);
+    flow.start(newSessionFlow(config.servers));
   };
 
   const tryOpenInCmux = () => {
@@ -338,55 +178,6 @@ export function App({ config: initialConfig }: Props) {
     if (!s) return;
     setFlash(s.tmuxTarget ? 'opening in cmux...' : 'resuming offline session...');
     void openSessionInCmux(s, config.servers).then((r) => setFlash(r.message));
-  };
-
-  // ---- Launch new session in tmux ------------------------------------------
-  const startNewSession = () => {
-    setFlash(undefined);
-    setConfigMode({ kind: 'newSession', step: 0, draft: {}, value: '' });
-  };
-
-  const advanceNewSession = async (val: string) => {
-    if (configMode?.kind !== 'newSession') return;
-    const v = val.trim();
-    if (configMode.step === 0) {
-      const serverName = v || 'local';
-      const server = config.servers.find((s) => s.name === serverName);
-      if (!server) {
-        setFlash(`서버 없음: '${serverName}' (가능: ${config.servers.map((s) => s.name).join(', ')})`);
-        setConfigMode(null);
-        return;
-      }
-      setConfigMode({ kind: 'newSession', step: 1, draft: { server: serverName }, value: '' });
-      return;
-    }
-    if (configMode.step === 1) {
-      // cwd validation: empty = default (home); reject unsafe characters
-      if (v && !/^[\w./\-~]+$/.test(v)) {
-        setFlash('경로 무효: 스페이스/특수문자는 미지원');
-        setConfigMode(null);
-        return;
-      }
-      setConfigMode({
-        kind: 'newSession',
-        step: 2,
-        draft: { ...configMode.draft, cwd: v },
-        value: '',
-      });
-      return;
-    }
-    // step 2: session name (empty → default)
-    const server = config.servers.find((s) => s.name === configMode.draft.server);
-    if (!server) {
-      setFlash('서버를 찾지 못함');
-      setConfigMode(null);
-      return;
-    }
-    const cwd = configMode.draft.cwd ?? '';
-    setConfigMode(null);
-    setFlash('launching...');
-    const r = await newSessionInCmux(server, v, cwd);
-    setFlash(r.message);
   };
 
   const tryEnterInput = () => {
@@ -416,18 +207,18 @@ export function App({ config: initialConfig }: Props) {
     }
     const target = s.tmuxTarget;
     // Optimistic echo — show the sent message immediately, like a chat app.
-    setTranscript((prev) => [...prev, { type: 'user', message: { role: 'user', content: text } }]);
+    transcript.appendOptimistic({ type: 'user', message: { role: 'user', content: text } });
     try {
       await sendToSession(config.servers, target, text);
       setFlash(`✓ → ${target}`);
-      void loadLiveness(allSessionsRef.current); // reflect busy quickly
+      void liveness_h.reload(); // reflect busy quickly
     } catch (err) {
       setFlash(`✗ 전송 실패: ${(err as Error).message}`);
     }
     // Keep input mode active so the user can keep chatting (Esc to exit).
   };
 
-  // Navigation — disabled while typing in the input box.
+  // Navigation — disabled while typing in the input box or running a flow.
   useInput(
     (input, key) => {
       if (input === 'q' || (key.ctrl && input === 'c')) {
@@ -436,8 +227,8 @@ export function App({ config: initialConfig }: Props) {
       }
       if (input === 'r') {
         void (async () => {
-          const s = await loadSessions();
-          await loadLiveness(s);
+          const s = await sessions_h.reload();
+          await liveness_h.reload(s);
         })();
         return;
       }
@@ -479,28 +270,18 @@ export function App({ config: initialConfig }: Props) {
         // transcript pane — scroll the chat view
         const ARROW_STEP = 3;
         const page = Math.max(1, (stdout?.rows ?? 30) - 4);
-        if (key.upArrow) setTranscriptScroll((n) => n + ARROW_STEP);
-        if (key.downArrow) setTranscriptScroll((n) => Math.max(0, n - ARROW_STEP));
-        if (key.pageUp) setTranscriptScroll((n) => n + page);
-        if (key.pageDown) setTranscriptScroll((n) => Math.max(0, n - page));
-        if (input === 'g') setTranscriptScroll(1_000_000); // clamped to top in Transcript
-        if (input === 'G') {
-          setTranscriptScroll(0);
-          // Force refresh immediately since polling was paused while scrolled.
-          const s = currentSessionRef.current;
-          const sourceServer = s ? serverByName.get(s.source) : undefined;
-          if (sourceServer && s) {
-            void readTranscript(sourceServer, s.filePath).then((t) => {
-              if (currentSessionRef.current?.filePath === s.filePath) setTranscript(t);
-            });
-          }
-        }
+        if (key.upArrow) transcript.setScrollOffset((n) => n + ARROW_STEP);
+        if (key.downArrow) transcript.setScrollOffset((n) => Math.max(0, n - ARROW_STEP));
+        if (key.pageUp) transcript.setScrollOffset((n) => n + page);
+        if (key.pageDown) transcript.setScrollOffset((n) => Math.max(0, n - page));
+        if (input === 'g') transcript.setScrollOffset(1_000_000); // clamped to top in Transcript
+        if (input === 'G') transcript.forceTail();
         if (key.leftArrow) setPane('sessions');
         if (input === 'i' || key.return) tryEnterInput();
         if (input === 'o') tryOpenInCmux();
       }
     },
-    { isActive: !inputMode && !configMode },
+    { isActive: !inputMode && !flow.active },
   );
 
   // Escape cancels input mode.
@@ -514,34 +295,33 @@ export function App({ config: initialConfig }: Props) {
     { isActive: inputMode },
   );
 
-  // Configuration mode: Esc cancels; for delete, y/n confirms.
+  // Flow mode: Esc cancels; for a confirm flow, y/n accepts/declines.
   useInput(
     (input, key) => {
       if (key.escape) {
-        setConfigMode(null);
+        flow.cancel();
         return;
       }
-      if (configMode?.kind === 'delete') {
-        if (input === 'y' || input === 'Y') void confirmDeleteServer();
-        if (input === 'n' || input === 'N') setConfigMode(null);
+      if (flow.active?.def.confirm) {
+        if (input === 'y' || input === 'Y') flow.confirm();
+        if (input === 'n' || input === 'N') flow.cancel();
       }
     },
-    { isActive: !!configMode },
+    { isActive: !!flow.active },
   );
 
   const totalWidth = stdout?.columns ?? 120;
   const totalHeight = stdout?.rows ?? 30;
-  const transcriptWidth = Math.max(40, totalWidth - 64);
-  const paneHeight = totalHeight - 3; // usage header (1) + footer (1) + margin (1)
+  const transcriptWidth = Math.max(UI.rightColumnMinWidth, totalWidth - UI.rightColumnReserve);
+  const paneHeight = totalHeight - UI.paneHeightMargin;
   // The right column stacks: SessionInfo / Transcript / Composer.
   // SessionInfo is fixed height; composer grows with input; transcript absorbs the rest.
-  const MAX_COMPOSER_LINES = 6;
-  const composerInputWidth = Math.max(4, transcriptWidth - 6);
+  const composerInputWidth = Math.max(4, transcriptWidth - UI.composerGutterReserve);
   const composerTextLines = inputMode
-    ? Math.min(MAX_COMPOSER_LINES, countLines(inputValue, composerInputWidth))
+    ? Math.min(UI.maxComposerLines, countLines(inputValue, composerInputWidth))
     : 1;
   const composerHeight = composerTextLines + 2; // round border (2) + text lines
-  const sessionInfoHeight = 6; // border (2) + 4 content lines (title + cwd + status + ctx)
+  const sessionInfoHeight = UI.sessionInfoHeight;
   const transcriptHeight = Math.max(3, paneHeight - composerHeight - sessionInfoHeight);
 
   const composerDisabledReason = !currentSession
@@ -562,7 +342,7 @@ export function App({ config: initialConfig }: Props) {
 
   return (
     <Box flexDirection="column">
-      <UsageBar limits={rateLimits} />
+      <UsageBar limits={rate.limits} />
       <Box>
         <ServerList
           items={filterItems}
@@ -585,17 +365,17 @@ export function App({ config: initialConfig }: Props) {
             session={currentSession}
             usage={transcriptMeta.usage}
             turns={transcriptMeta.turns}
-            entries={transcript.length}
+            entries={transcript.entries.length}
           />
           <Transcript
-            entries={transcript}
-            loading={transcriptLoading}
-            error={transcriptError}
+            entries={transcript.entries}
+            loading={transcript.loading}
+            error={transcript.error}
             width={transcriptWidth}
             height={transcriptHeight}
             focused={pane === 'transcript'}
-            scrollOffset={transcriptScroll}
-            onClamp={setTranscriptScroll}
+            scrollOffset={transcript.scrollOffset}
+            onClamp={transcript.setScrollOffset}
           />
           <Composer
             width={transcriptWidth}
@@ -611,55 +391,8 @@ export function App({ config: initialConfig }: Props) {
         </Box>
       </Box>
       <Box paddingX={1}>
-        {configMode?.kind === 'add' ? (
-          <Box>
-            <Text color="cyan">
-              Add 서버 ({configMode.step + 1}/{ADD_STEPS.length}){' '}
-              {ADD_LABELS[ADD_STEPS[configMode.step]!]}:{' '}
-            </Text>
-            <TextInput
-              value={configMode.value}
-              onChange={(v) =>
-                setConfigMode((m) => (m?.kind === 'add' ? { ...m, value: v } : m))
-              }
-              onSubmit={advanceAddServer}
-              focus
-              placeholder={ADD_STEPS[configMode.step] === 'privateKeyPath' ? '~/.ssh/id_ed25519' : ''}
-            />
-          </Box>
-        ) : configMode?.kind === 'delete' ? (
-          <Text>
-            <Text color="red">Delete </Text>
-            <Text bold>{configMode.serverName}</Text>
-            <Text color="red">? [y/n]</Text>
-          </Text>
-        ) : configMode?.kind === 'newSession' ? (
-          <Box>
-            <Text color="cyan">
-              New session ({configMode.step + 1}/3){' '}
-              {configMode.step === 0
-                ? `서버 (${config.servers.map((s) => s.name).join('|')}, Enter=local)`
-                : configMode.step === 1
-                  ? '경로 (Enter=홈)'
-                  : `세션 이름 (Enter=${defaultSessionName()})`}
-              :{' '}
-            </Text>
-            <TextInput
-              value={configMode.value}
-              onChange={(v) =>
-                setConfigMode((m) => (m?.kind === 'newSession' ? { ...m, value: v } : m))
-              }
-              onSubmit={advanceNewSession}
-              focus
-              placeholder={
-                configMode.step === 0
-                  ? 'local'
-                  : configMode.step === 1
-                    ? '~/project/foo (선택)'
-                    : defaultSessionName()
-              }
-            />
-          </Box>
+        {flow.active ? (
+          <FlowPrompt active={flow.active} onChange={flow.setValue} onSubmit={flow.submit} />
         ) : (
           <Text dimColor wrap="truncate-end">
             {inputMode ? (

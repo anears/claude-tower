@@ -1,5 +1,6 @@
 import { Box, Text } from 'ink';
 import { windowStart } from '../lib/scroll.js';
+import { UI } from '../constants.js';
 
 export interface FilterItem {
   label: string;
@@ -32,7 +33,7 @@ export function ServerList({ items, selectedIndex, focused, height }: Props) {
       flexDirection="column"
       borderStyle="round"
       borderColor={focused ? 'cyan' : 'gray'}
-      width={20}
+      width={UI.sidebarWidth}
       height={height}
       paddingX={1}
     >

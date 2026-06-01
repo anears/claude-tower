@@ -11,6 +11,9 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ServerConfig } from '../config.js';
 import type { SessionInfo } from '../types/message.js';
+import { parseTmuxTarget, type TmuxTarget } from './tmux-target.js';
+import { remoteShellCommand } from './shell-command.js';
+import { buildAttachInner, buildNewSessionInner } from './tmux-launch.js';
 
 const execFileP = promisify(execFile);
 
@@ -82,38 +85,15 @@ async function newWorkspace(args: {
   );
 }
 
-// tmuxTarget format from liveness: "<host>:<session>:<window>.<pane>"
-interface ParsedTarget {
-  host: string;
-  session: string;
-  window: string;
-  pane: string;
+// Wrap the attach command for a remote host. Unlike the new/resume paths, the
+// attach uses a *bare* `ssh -t <host>` (no -i/-p, no `bash -lc`) so the tmux
+// select/attach chain runs directly in the user's shell — relying on ~/.ssh/
+// config like the original. tmux refs are digits + ':' + '.' so quoting is safe.
+function attachCommand(host: string, inner: string): string {
+  return host === 'local' ? inner : `ssh -t ${host} '${inner}'`;
 }
 
-function parseTmuxTarget(t: string): ParsedTarget | null {
-  const i = t.indexOf(':');
-  if (i < 0) return null;
-  const host = t.slice(0, i);
-  const rest = t.slice(i + 1);
-  const m = rest.match(/^([^:]+):(\d+)\.(\d+)$/);
-  if (!m) return null;
-  return { host, session: m[1]!, window: m[2]!, pane: m[3]! };
-}
-
-// Build the shell command we feed to cmux --command. cmux just types this
-// string + Enter into a fresh terminal, so it runs in the user's shell.
-function buildLaunchCommand(p: ParsedTarget): string {
-  // Three separate tmux invocations chained with `;` are easier to quote than
-  // tmux's internal `\;` chain. select-* run *outside* the attach so they
-  // pre-position the active window/pane before `attach` blocks.
-  const setup = `tmux select-window -t ${p.session}:${p.window}; tmux select-pane -t ${p.session}:${p.window}.${p.pane}`;
-  const attach = `tmux attach -t ${p.session}`;
-  if (p.host === 'local') return `${setup}; ${attach}`;
-  // Wrap the remote command in single quotes; tmux refs are digits + ':' + '.' so quoting is safe.
-  return `ssh -t ${p.host} '${setup}; ${attach}'`;
-}
-
-function workspaceTitle(session: SessionInfo, parsed: ParsedTarget): string {
+function workspaceTitle(session: SessionInfo, parsed: TmuxTarget): string {
   const cwdLeaf = (session.cwd || '').split('/').filter(Boolean).slice(-1)[0] ?? 'session';
   return `${parsed.host} · ${cwdLeaf}`;
 }
@@ -151,7 +131,7 @@ export async function openSessionInCmux(
       await newWorkspace({
         name: workspaceTitle(session, parsed),
         description: tag,
-        command: buildLaunchCommand(parsed),
+        command: attachCommand(parsed.host, buildAttachInner(parsed)),
       });
       return { ok: true, action: 'opened-new', message: `▶ attached` };
     } catch (e) {
@@ -181,8 +161,8 @@ async function resumeOfflineSession(
   const cwd = cwdCheck.value || '$HOME';
   const tmuxName = sanitizeTmuxName(`resume-${session.sessionId.slice(0, 8)}`);
   const launch = `${CLAUDE_INVOCATION} --resume ${session.sessionId}`;
-  const inner = `cd ${cwd} && tmux new -As ${tmuxName} ${launch}`;
-  const command = server.local ? inner : `${sshCommandPrefix(server)} 'bash -lc "${inner}"'`;
+  const inner = buildNewSessionInner(cwd, tmuxName, launch);
+  const command = server.local ? inner : remoteShellCommand(inner, server);
   const cwdLeaf = (session.cwd || '').split('/').filter(Boolean).slice(-1)[0] ?? session.sessionId.slice(0, 8);
   const title = `${server.name} · ${cwdLeaf}`;
   try {
@@ -213,16 +193,6 @@ export function defaultSessionName(): string {
   return `claude-${hh}${mm}`;
 }
 
-function sshCommandPrefix(server: ServerConfig): string {
-  // Explicit form so it works regardless of ~/.ssh/config. Force a pty (-t)
-  // because tmux needs one.
-  const parts = ['ssh', '-t'];
-  if (server.privateKeyPath) parts.push('-i', server.privateKeyPath);
-  if (server.port && server.port !== 22) parts.push('-p', String(server.port));
-  parts.push(server.username ? `${server.username}@${server.host}` : server.host);
-  return parts.join(' ');
-}
-
 // Allow only safe path characters so we can pass `-c <path>` bare (no quoting
 // gymnastics across ssh + bash -lc + tmux). Covers almost all real project
 // paths; users with spaces / specials in paths would need to rename or wrap.
@@ -244,12 +214,8 @@ function buildNewSessionCommand(server: ServerConfig, sessionName: string, cwd: 
   //   (without this, local inherits the cmux workspace's caller cwd while
   //    remote `bash -lc` starts at $HOME — confusing asymmetry)
   const targetCwd = cwd || '$HOME';
-  const launch = `tmux new -As ${sessionName} ${CLAUDE_INVOCATION}`;
-  const inner = `cd ${targetCwd} && ${launch}`;
-  if (server.local) return inner;
-  // bash -lc forces a login shell so PATH (claude is in ~/.local/bin) is set
-  // the same way as the user's interactive remote shell.
-  return `${sshCommandPrefix(server)} 'bash -lc "${inner}"'`;
+  const inner = buildNewSessionInner(targetCwd, sessionName, CLAUDE_INVOCATION);
+  return server.local ? inner : remoteShellCommand(inner, server);
 }
 
 export async function newSessionInCmux(

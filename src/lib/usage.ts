@@ -84,6 +84,14 @@ export function bar(ratio: number, width: number): string {
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled));
 }
 
+// Utilization → traffic-light color. Input is a 0..100 percentage. Shared by
+// the usage bar and the per-session context meter (which passes ratio * 100).
+export function pctColor(p: number): string {
+  if (p >= 90) return 'red';
+  if (p >= 70) return 'yellow';
+  return 'green';
+}
+
 export function untilReset(at: Date | null | undefined): string {
   if (!at) return '';
   const ms = at.getTime() - Date.now();

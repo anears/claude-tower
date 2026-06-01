@@ -2,6 +2,9 @@ import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import type { SessionInfo } from '../types/message.js';
 import { windowStart } from '../lib/scroll.js';
+import { getSessionBadge } from '../lib/status.js';
+import { timeAgo, shortCwd } from '../lib/time.js';
+import { UI } from '../constants.js';
 
 interface Props {
   sessions: SessionInfo[];
@@ -10,32 +13,6 @@ interface Props {
   loading: boolean;
   error?: string;
   height: number;
-}
-
-function timeAgo(date: Date): string {
-  const diff = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-function shortCwd(cwd: string): string {
-  const parts = cwd.split('/').filter(Boolean);
-  if (parts.length <= 2) return cwd;
-  return '…/' + parts.slice(-2).join('/');
-}
-
-function statusBadge(s: SessionInfo): { dot: string; color: string; label: string } {
-  if (s.liveOn.length === 0) return { dot: '○', color: 'gray', label: '' };
-  switch (s.status) {
-    case 'busy':
-      return { dot: '●', color: 'yellow', label: 'busy' };
-    case 'idle':
-      return { dot: '●', color: 'green', label: 'idle' };
-    default:
-      return { dot: '●', color: 'cyan', label: s.status ?? 'live' };
-  }
 }
 
 const LINES_PER_ITEM = 2;
@@ -64,7 +41,7 @@ export function SessionList({ sessions, selectedIndex, focused, loading, error, 
       flexDirection="column"
       borderStyle="round"
       borderColor={focused ? 'cyan' : 'gray'}
-      width={40}
+      width={UI.sessionListWidth}
       height={height}
       paddingX={1}
     >
@@ -88,7 +65,7 @@ export function SessionList({ sessions, selectedIndex, focused, loading, error, 
             {visible.map((s, i) => {
               const realIdx = start + i;
               const selected = realIdx === selectedIndex;
-              const badge = statusBadge(s);
+              const badge = getSessionBadge(s, false);
               const live = s.liveOn.length > 0;
               const headline = s.aiTitle ?? shortCwd(s.cwd);
               return (

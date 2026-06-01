@@ -1,6 +1,7 @@
 import { Box, Text } from 'ink';
 import type { SessionInfo as Session } from '../types/message.js';
-import { bar, fmtCost, fmtTokens, shortModel, type SessionUsage } from '../lib/usage.js';
+import { bar, fmtCost, fmtTokens, shortModel, pctColor, type SessionUsage } from '../lib/usage.js';
+import { getSessionBadge } from '../lib/status.js';
 
 interface Props {
   width: number;
@@ -9,18 +10,6 @@ interface Props {
   usage?: SessionUsage;
   turns: number;
   entries: number;
-}
-
-function statusBadge(session: Session): { dot: string; color: string; label: string } {
-  if (session.liveOn.length === 0) return { dot: '○', color: 'gray', label: 'offline' };
-  switch (session.status) {
-    case 'busy':
-      return { dot: '●', color: 'yellow', label: 'busy' };
-    case 'idle':
-      return { dot: '●', color: 'green', label: 'idle' };
-    default:
-      return { dot: '●', color: 'cyan', label: session.status ?? 'live' };
-  }
 }
 
 export function SessionInfoPanel({ width, height, session, usage, turns, entries }: Props) {
@@ -39,7 +28,7 @@ export function SessionInfoPanel({ width, height, session, usage, turns, entries
     );
   }
 
-  const badge = statusBadge(session);
+  const badge = getSessionBadge(session);
   const title = session.aiTitle ?? session.cwd;
   const model = usage?.model ? shortModel(usage.model) : '?';
 
@@ -51,7 +40,7 @@ export function SessionInfoPanel({ width, height, session, usage, turns, entries
       ratio: r,
       barStr: bar(r, 6),
       label: `${fmtTokens(u.contextTokens)}/${fmtTokens(u.contextMax)} (${Math.round(r * 100)}%)`,
-      color: r >= 0.9 ? 'red' : r >= 0.7 ? 'yellow' : 'green',
+      color: pctColor(r * 100),
     };
   })();
   const cost = usage && usage.totalCost > 0 ? `~${fmtCost(usage.totalCost)}` : null;

@@ -1,38 +1,9 @@
 import { exec, readRemoteFile } from './ssh.js';
 import { parseJsonl, decodeProjectDir } from './parser.js';
 import { pyCommand } from './remote.js';
+import { LIST_SCRIPT } from './remote-scripts.js';
 import type { ServerConfig } from '../config.js';
 import type { SessionInfo, TranscriptEntry } from '../types/message.js';
-
-// Runs once on the remote and emits one TSV row per session:
-// mtime <tab> size <tab> path <tab> sessionId <tab> cwd <tab> gitBranch <tab> aiTitle
-const LIST_SCRIPT = `import os, json, glob, sys
-from itertools import islice
-def clean(s): return str(s).replace('\\t', ' ').replace('\\n', ' ').replace('\\r', ' ')
-base = os.path.expanduser('~/.claude/projects')
-out = []
-for f in glob.glob(os.path.join(base, '*', '*.jsonl')):
-    try:
-        st = os.stat(f)
-    except OSError:
-        continue
-    cwd = ''; branch = ''; sid = ''; title = ''
-    try:
-        with open(f, 'r', errors='replace') as fh:
-            for line in islice(fh, 120):
-                line = line.strip()
-                if not line: continue
-                try: o = json.loads(line)
-                except Exception: continue
-                if not sid and o.get('sessionId'): sid = o['sessionId']
-                if not cwd and o.get('cwd'): cwd = o['cwd']
-                if not branch and o.get('gitBranch'): branch = o['gitBranch']
-                if o.get('aiTitle'): title = o['aiTitle']
-    except Exception:
-        pass
-    out.append('\\t'.join([str(st.st_mtime), str(st.st_size), f, sid, clean(cwd), clean(branch), clean(title)]))
-sys.stdout.write('\\n'.join(out))
-`;
 
 // The home dir is NFS-shared across the fundus cluster, so the session list is
 // cluster-wide — read it from a single server. `liveOn` is filled in later by
