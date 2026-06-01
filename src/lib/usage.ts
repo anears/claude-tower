@@ -17,7 +17,10 @@ export interface ModelInfo {
 }
 
 const PRICES: Record<string, ModelInfo> = {
-  // Opus 4.7 expanded to 1M context window
+  // Opus 4.7+ have a 1M context window. Each such version needs an explicit
+  // entry — the longest-prefix match below would otherwise fall through to the
+  // generic `claude-opus` (200k). Add new 1M Opus versions here.
+  'claude-opus-4-8': { input: 15, output: 75, cacheCreation: 18.75, cacheRead: 1.5, contextMax: 1_000_000 },
   'claude-opus-4-7': { input: 15, output: 75, cacheCreation: 18.75, cacheRead: 1.5, contextMax: 1_000_000 },
   // Opus default 200k
   'claude-opus': { input: 15, output: 75, cacheCreation: 18.75, cacheRead: 1.5, contextMax: 200_000 },
