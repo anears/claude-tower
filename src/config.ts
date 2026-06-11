@@ -32,18 +32,12 @@ const LOCAL_SERVER: ServerConfig = {
   local: true,
 };
 
+// First-run default: no remote servers. `ensureLocal` always prepends the local
+// entry, so a fresh install starts with just the user's own machine — they add
+// remote servers themselves with the 'a' key (no one else's host/account baked
+// in). See README "설정".
 const DEFAULT_CONFIG: Config = {
-  servers: [
-    {
-      name: 'f5',
-      host: '172.31.10.15',
-      port: 22,
-      username: 'gitaek.kwon',
-      privateKeyPath: join(homedir(), '.ssh', 'id_ed25519'),
-      remoteClaudeDir: '~/.claude',
-      local: false,
-    },
-  ],
+  servers: [],
 };
 
 // Ensure a single local server entry always exists at the front of the list.
