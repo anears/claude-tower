@@ -3,6 +3,7 @@ import { listSessions, readTranscript } from './lib/sessions.js';
 import { getLiveness } from './lib/liveness.js';
 import { disconnectAll } from './lib/ssh.js';
 import { computeTranscriptStats } from './lib/transcript-stats.js';
+import { dayWindow, extractSessionActivity, buildDailyReport } from './lib/daily-report.js';
 import type { SessionInfo } from './types/message.js';
 
 async function main() {
@@ -45,6 +46,30 @@ async function main() {
     console.log(
       `\nDetail of [0]: ${entries.length} entries · ${turns} turns · ${outTokens} out-tokens · title="${sessions[0].aiTitle ?? ''}"`,
     );
+  }
+
+  // Daily work report (today) — exercise the extractor end-to-end. The home is
+  // NFS-shared, so every transcript is readable from the primary server.
+  const win = dayWindow(new Date());
+  const todays = sessions.filter((s) => s.lastModified.getTime() >= win.start.getTime());
+  const acts = [];
+  for (const s of todays.slice(0, 20)) {
+    try {
+      const entries = await readTranscript(primary, s.filePath);
+      const a = extractSessionActivity(s, entries, win);
+      if (a) acts.push(a);
+    } catch {
+      // skip unreadable transcript
+    }
+  }
+  const report = buildDailyReport(win.label, acts, new Date());
+  console.log(
+    `\nDaily report ${report.dateLabel}: ${report.totals.sessions} sessions · ` +
+      `${report.totals.projects} projects · ${report.totals.turns} turns · ` +
+      `${report.totals.files} files · ${report.totals.commands} cmds`,
+  );
+  for (const p of report.projects.slice(0, 5)) {
+    console.log(`  ${p.project}: ${p.turns} turns, ${p.files.length} files, ${p.commands.length} cmds`);
   }
 
   await disconnectAll();

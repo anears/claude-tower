@@ -7,6 +7,7 @@ import { SessionInfoPanel } from './SessionInfo.js';
 import { Composer } from './Composer.js';
 import { UsageBar } from './UsageBar.js';
 import { FlowPrompt } from './FlowPrompt.js';
+import { DailyReport } from './DailyReport.js';
 import type { Config, ServerConfig } from '../config.js';
 import type { SessionInfo } from '../types/message.js';
 import { sendToSession } from '../lib/tmux.js';
@@ -21,8 +22,11 @@ import { useLiveness } from '../hooks/useLiveness.js';
 import { useRateLimits } from '../hooks/useRateLimits.js';
 import { useTranscript } from '../hooks/useTranscript.js';
 import { useFlow } from '../hooks/useFlow.js';
+import { useDailyReport } from '../hooks/useDailyReport.js';
 import { addServerFlow, deleteServerFlow } from '../lib/flows/serverFlows.js';
 import { newSessionFlow } from '../lib/flows/sessionFlows.js';
+import { saveReportLocally, polishReport } from '../lib/report-io.js';
+import { localDateLabel } from '../lib/daily-report.js';
 
 type Pane = 'filter' | 'sessions' | 'transcript';
 
@@ -60,6 +64,9 @@ export function App({ config: initialConfig }: Props) {
     for (const s of config.servers) m.set(s.name, s);
     return m;
   }, [config.servers]);
+
+  // Daily work report overlay (its own polling-free state machine).
+  const report = useDailyReport(allSessions, serverByName);
 
   // Refresh sessions then liveness for a (possibly new) config — fire-and-forget.
   const reloadAfterConfig = (cfg: Config): void => {
@@ -180,6 +187,33 @@ export function App({ config: initialConfig }: Props) {
     void openSessionInCmux(s, config.servers).then((r) => setFlash(r.message));
   };
 
+  // Save the current report as markdown on this (dashboard) machine.
+  const saveReport = () => {
+    const r = report.report;
+    if (!r) {
+      setFlash('리포트가 아직 없음');
+      return;
+    }
+    setFlash('저장 중…');
+    void saveReportLocally(r)
+      .then((path) => setFlash(`✓ 저장됨: ${path}`))
+      .catch((err) => setFlash(`✗ 저장 실패: ${(err as Error).message}`));
+  };
+
+  // Launch a fresh cmux session that reads the saved report and rewrites it
+  // (interactive claude — subscription, no metered API cost).
+  const startPolish = () => {
+    const r = report.report;
+    if (!r) {
+      setFlash('리포트가 아직 없음');
+      return;
+    }
+    setFlash('윤문 세션 시작 중…');
+    void polishReport(r)
+      .then((m) => setFlash(m))
+      .catch((err) => setFlash(`✗ ${(err as Error).message}`));
+  };
+
   const tryEnterInput = () => {
     const s = currentSessionRef.current;
     if (!s) return;
@@ -232,6 +266,10 @@ export function App({ config: initialConfig }: Props) {
         })();
         return;
       }
+      if (input === 'D') {
+        report.openReport();
+        return;
+      }
       if (key.tab) {
         setPane((p) => (p === 'filter' ? 'sessions' : p === 'sessions' ? 'transcript' : 'filter'));
         return;
@@ -281,7 +319,31 @@ export function App({ config: initialConfig }: Props) {
         if (input === 'o') tryOpenInCmux();
       }
     },
-    { isActive: !inputMode && !flow.active },
+    { isActive: !inputMode && !flow.active && !report.open },
+  );
+
+  // Daily report overlay: scroll, day navigation, save, AI polish.
+  useInput(
+    (input, key) => {
+      const page = Math.max(1, (stdout?.rows ?? 30) - 4);
+      const ARROW_STEP = 3;
+      if (key.escape || input === 'D') {
+        report.close();
+        return;
+      }
+      if (key.upArrow) report.setScrollOffset((n) => n + ARROW_STEP);
+      if (key.downArrow) report.setScrollOffset((n) => Math.max(0, n - ARROW_STEP));
+      if (key.pageUp) report.setScrollOffset((n) => n + page);
+      if (key.pageDown) report.setScrollOffset((n) => Math.max(0, n - page));
+      if (input === 'g') report.setScrollOffset(1_000_000); // clamped to top
+      if (input === 'G') report.setScrollOffset(0);
+      if (key.leftArrow || input === '[') report.shiftDay(-1);
+      if (key.rightArrow || input === ']') report.shiftDay(1);
+      if (input === 't') report.goToday();
+      if (input === 's') saveReport();
+      if (input === 'p') startPolish();
+    },
+    { isActive: report.open && !inputMode && !flow.active },
   );
 
   // Escape cancels input mode.
@@ -343,6 +405,18 @@ export function App({ config: initialConfig }: Props) {
   return (
     <Box flexDirection="column">
       <UsageBar limits={rate.limits} />
+      {report.open ? (
+        <DailyReport
+          report={report.report}
+          loading={report.loading}
+          error={report.error}
+          dateLabel={localDateLabel(report.viewDate)}
+          width={totalWidth}
+          height={paneHeight}
+          scrollOffset={report.scrollOffset}
+          onClamp={report.setScrollOffset}
+        />
+      ) : (
       <Box>
         <ServerList
           items={filterItems}
@@ -390,25 +464,30 @@ export function App({ config: initialConfig }: Props) {
           />
         </Box>
       </Box>
+      )}
       <Box paddingX={1}>
         {flow.active ? (
           <FlowPrompt active={flow.active} onChange={flow.setValue} onSubmit={flow.submit} />
         ) : (
           <Text dimColor wrap="truncate-end">
-            {inputMode ? (
+            {report.open ? (
+              <Text color="magenta">
+                일일 리포트 · [↑↓] 스크롤 · [←→] 날짜 · [t] 오늘 · [s] 저장 · [p] AI 윤문 · [Esc] 닫기
+              </Text>
+            ) : inputMode ? (
               <Text color="cyan">채팅 모드 · Enter 전송 · Esc 나가기</Text>
             ) : pane === 'transcript' ? (
               <>
-                [Tab] pane · [↑↓] 3줄 · [PgUp/PgDn] 페이지 · [g/G] 처음/최신 · [←] 뒤로 · [i] 채팅 · [o] cmux · [q]
+                [Tab] pane · [↑↓] 3줄 · [PgUp/PgDn] 페이지 · [g/G] 처음/최신 · [←] 뒤로 · [i] 채팅 · [o] cmux · [D] 리포트 · [q]
               </>
             ) : pane === 'filter' ? (
               <>
-                [Tab] pane · [↑↓] nav · [Space] toggle · [a] 추가 · [d] 삭제 · [n] 새 세션 · [r] refresh ·{' '}
+                [Tab] pane · [↑↓] nav · [Space] toggle · [a] 추가 · [d] 삭제 · [n] 새 세션 · [D] 리포트 · [r] refresh ·{' '}
                 <Text color="yellow">●</Text>busy <Text color="green">●</Text>idle ○off · [q] quit
               </>
             ) : (
               <>
-                [Tab] pane · [↑↓] nav · [i] 채팅 · [o] cmux · [n] 새 세션 · [r] refresh ·{' '}
+                [Tab] pane · [↑↓] nav · [i] 채팅 · [o] cmux · [n] 새 세션 · [D] 리포트 · [r] refresh ·{' '}
                 <Text color="yellow">●</Text>busy <Text color="green">●</Text>idle ○off · [q] quit
               </>
             )}

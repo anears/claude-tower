@@ -218,6 +218,43 @@ function buildNewSessionCommand(server: ServerConfig, sessionName: string, cwd: 
   return server.local ? inner : remoteShellCommand(inner, server);
 }
 
+// ---- Daily-report AI polish -------------------------------------------------
+// Launch a fresh local cmux workspace running an interactive `claude` seeded
+// with a prompt to read the saved report file and rewrite it. Interactive mode
+// (no `-p`) so it runs on the user's subscription, not metered API. The report
+// is referenced by absolute path, so cwd is irrelevant and no shell-fragile
+// tmux wrapping is needed — claude reads the file from anywhere.
+
+function shSingleQuote(s: string): string {
+  // POSIX-safe single quoting: close, escaped-quote, reopen for any embedded '.
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+export async function polishReportInCmux(reportPath: string, dateLabel: string): Promise<OpenResult> {
+  if (!(await cmuxAvailable())) {
+    return { ok: false, action: 'cmux-unavailable', message: 'cmux CLI 사용 불가' };
+  }
+  // The polish session writes its result to a sibling .polished.md (Write runs
+  // without a prompt under --dangerously-skip-permissions), so the cleaned-up
+  // report is saved automatically, not just shown on screen.
+  const outPath = reportPath.replace(/\.md$/, '') + '.polished.md';
+  const prompt =
+    `${reportPath} 파일을 읽고, 이 일일 업무 기록을 한국어 근무 보고서로 간결하게 정리해줘. ` +
+    `핵심 성과 위주로 항목화하고, 단순 파일/명령 나열은 묶어서 요약해줘. ` +
+    `정리한 최종 결과는 반드시 ${outPath} 파일로 저장(Write)해줘.`;
+  const command = `${CLAUDE_INVOCATION} ${shSingleQuote(prompt)}`;
+  try {
+    await newWorkspace({
+      name: `윤문 · ${dateLabel}`,
+      description: `agent-view:report-polish:${dateLabel}`,
+      command,
+    });
+    return { ok: true, action: 'opened-new', message: `▶ 윤문 세션 시작 · 완료 후 ${outPath}에 저장됨` };
+  } catch (e) {
+    return { ok: false, action: 'error', message: `윤문 세션 생성 실패: ${(e as Error).message}` };
+  }
+}
+
 export async function newSessionInCmux(
   server: ServerConfig,
   rawName?: string,
