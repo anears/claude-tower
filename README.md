@@ -1,4 +1,4 @@
-# Agent View
+# Claude Tower
 
 여러 원격 서버에 걸친 **Claude Code 세션을 SSH로 한 화면에서 관리하는 터미널 대시보드**입니다. Ink(터미널용 React) 기반의 TUI이며, **API 비용 0** 원칙으로 동작합니다 — 세션 정보는 로컬/원격 파일에서 읽고, rate limit은 OAuth usage 엔드포인트(메타데이터)만 조회하며, AI 윤문은 사용자의 인터랙티브 `claude`(구독)로 처리합니다.
 
@@ -34,7 +34,7 @@
 
 ```bash
 git clone <이 저장소>
-cd agent-view
+cd claude-tower
 npm install
 npm run build      # tsc → dist/
 npm start          # = node dist/cli.js
@@ -46,7 +46,7 @@ npm start          # = node dist/cli.js
 npm run dev        # tsx src/cli.tsx
 ```
 
-전역 명령으로 쓰려면 빌드 후 `npm link` (bin: `agent-view`).
+전역 명령으로 쓰려면 빌드 후 `npm link` (bin: `claude-tower`).
 
 ## 설정
 

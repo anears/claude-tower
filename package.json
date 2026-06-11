@@ -1,10 +1,10 @@
 {
-  "name": "agent-view",
+  "name": "claude-tower",
   "version": "0.1.0",
   "description": "Unified TUI dashboard for managing Claude Code sessions across remote servers over SSH",
   "type": "module",
   "bin": {
-    "agent-view": "./dist/cli.js"
+    "claude-tower": "./dist/cli.js"
   },
   "scripts": {
     "dev": "tsx src/cli.tsx",
