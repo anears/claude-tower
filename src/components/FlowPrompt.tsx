@@ -32,15 +32,60 @@ export function FlowPrompt({ active, onChange, onSubmit }: Props) {
   const header = `${def.header} (${step + 1}/${def.steps.length}) ${label}: `;
 
   return (
-    <Box>
-      <Text color="cyan">{header}</Text>
-      <TextInput
-        value={value}
-        onChange={onChange}
-        onSubmit={onSubmit}
-        focus
-        placeholder={placeholder}
-      />
+    <Box flexDirection="column">
+      <Box>
+        <Text color="cyan">{header}</Text>
+        <TextInput
+          // Remount when Tab fills the value so the cursor jumps to the end
+          // (ink-text-input keeps its own cursor offset across value changes).
+          key={`${step}-${active.completeNonce}`}
+          value={value}
+          onChange={onChange}
+          onSubmit={onSubmit}
+          focus
+          placeholder={placeholder}
+        />
+      </Box>
+      {stepDef.complete ? <CompletionList active={active} /> : null}
+    </Box>
+  );
+}
+
+// Folder names from the candidate full paths (everything after the last slash).
+function basename(p: string): string {
+  const trimmed = p.replace(/\/$/, '');
+  const i = trimmed.lastIndexOf('/');
+  return `${i >= 0 ? trimmed.slice(i + 1) : trimmed}/`;
+}
+
+// The Tab-completion result shown under the input: a spinner-free status while
+// listing, then a single truncated line of matching folder names.
+function CompletionList({ active }: { active: ActiveFlow }) {
+  const { completing, candidates } = active;
+  if (completing) {
+    return (
+      <Box marginLeft={2}>
+        <Text dimColor>… 폴더 조회 중</Text>
+      </Box>
+    );
+  }
+  if (!candidates) return null; // not tabbed yet
+  if (candidates.length === 0) {
+    return (
+      <Box marginLeft={2}>
+        <Text dimColor>(하위 폴더 없음)</Text>
+      </Box>
+    );
+  }
+  const MAX = 30;
+  const shown = candidates.slice(0, MAX).map(basename).join('  ');
+  const more = candidates.length > MAX ? ` …(+${candidates.length - MAX})` : '';
+  return (
+    <Box marginLeft={2}>
+      <Text dimColor wrap="truncate-end">
+        <Text color="green">{candidates.length}개</Text> {shown}
+        {more}
+      </Text>
     </Box>
   );
 }
