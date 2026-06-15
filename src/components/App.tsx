@@ -357,11 +357,16 @@ export function App({ config: initialConfig }: Props) {
     { isActive: inputMode },
   );
 
-  // Flow mode: Esc cancels; for a confirm flow, y/n accepts/declines.
+  // Flow mode: Esc cancels; Tab runs the current step's completion (if any);
+  // for a confirm flow, y/n accepts/declines.
   useInput(
     (input, key) => {
       if (key.escape) {
         flow.cancel();
+        return;
+      }
+      if (key.tab) {
+        flow.tab();
         return;
       }
       if (flow.active?.def.confirm) {
