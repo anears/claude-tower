@@ -21,6 +21,8 @@ export interface FlowStep {
   validate?: (value: string, draft: Record<string, string>) => string | undefined;
   // What to store for this step. Defaults to the trimmed input.
   transform?: (value: string) => string;
+  // Mask the input on screen with this character (e.g. '*' for a passphrase).
+  mask?: string;
   // Optional async Tab-completion. Given the current (trimmed) input + prior
   // answers, return candidate completions (e.g. full directory paths). Drives
   // the Tab key: FlowPrompt fills the longest common prefix and lists the
