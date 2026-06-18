@@ -44,6 +44,7 @@ export function FlowPrompt({ active, onChange, onSubmit }: Props) {
           onSubmit={onSubmit}
           focus
           placeholder={placeholder}
+          mask={stepDef.mask}
         />
       </Box>
       {stepDef.complete ? <CompletionList active={active} /> : null}

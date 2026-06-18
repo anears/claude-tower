@@ -10,6 +10,10 @@ const ServerConfig = z.object({
   port: z.number().default(22),
   username: z.string().default(''),
   privateKeyPath: z.string().optional(),
+  // Passphrase for an encrypted private key. Optional — prefer an SSH agent so
+  // no secret is written to disk. Persisted in config.json (mode 0600) only if
+  // set; see saveConfig.
+  passphrase: z.string().optional(),
   remoteClaudeDir: z.string().default('~/.claude'),
   local: z.boolean().default(false),
 });
@@ -50,7 +54,7 @@ function ensureLocal(cfg: Config): Config {
 export async function loadConfig(): Promise<Config> {
   if (!existsSync(CONFIG_PATH)) {
     await mkdir(dirname(CONFIG_PATH), { recursive: true });
-    await writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2));
+    await writeFile(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2), { mode: 0o600 });
     return ensureLocal(DEFAULT_CONFIG);
   }
   const raw = await readFile(CONFIG_PATH, 'utf-8');
@@ -60,8 +64,9 @@ export async function loadConfig(): Promise<Config> {
 export async function saveConfig(cfg: Config): Promise<void> {
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
   // Persist the non-local servers; the local entry is auto-added on load.
+  // mode 0600 since the file may hold a key passphrase.
   const persisted = { servers: cfg.servers.filter((s) => !s.local) };
-  await writeFile(CONFIG_PATH, JSON.stringify(persisted, null, 2));
+  await writeFile(CONFIG_PATH, JSON.stringify(persisted, null, 2), { mode: 0o600 });
 }
 
 export function getConfigPath(): string {
